@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>拼图解锁世界 · 玩法原型 v3（日式城镇 + 边缘/障碍双判定）</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#fff;font-family:"Microsoft YaHei",sans-serif;}
+  #hud{position:fixed;top:12px;left:12px;color:#333;font-size:14px;background:rgba(255,255,255,.82);padding:8px 12px;border-radius:8px;pointer-events:none;}
+  #prompt{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);color:#222;font-size:16px;background:rgba(255,255,255,.85);padding:8px 16px;border-radius:8px;display:none;}
+  #toast{position:fixed;top:20%;left:50%;transform:translateX(-50%);color:#fff;font-size:20px;background:rgba(40,40,40,.85);padding:12px 24px;border-radius:10px;display:none;transition:opacity .5s;}
+  #mapPanel{position:fixed;inset:0;background:rgba(30,30,30,.75);display:none;align-items:center;justify-content:center;}
+  #mapInner{background:#b7b7b7;border:3px solid #222;border-radius:6px;padding:16px;display:flex;gap:16px;}
+  #board{background:#9a9a9a;border:2px solid #444;cursor:crosshair;}
+  #inv{width:200px;background:#8f8f8f;border:2px solid #444;border-radius:4px;padding:10px;display:flex;flex-direction:column;gap:10px;}
+  #inv h3{margin:0 0 4px;font-size:15px;color:#111;text-align:center;}
+  .invItem{background:#6f79d6;border:2px solid #222;border-radius:4px;padding:6px;text-align:center;color:#fff;font-size:13px;cursor:pointer;}
+  .invItem.done{background:#5a7d4a;cursor:default;}
+  .invItem.sel{outline:3px solid #ffd400;}
+  .invItem canvas{display:block;margin:0 auto 4px;}
+  #mapBtns{display:flex;gap:8px;margin-top:10px;}
+  #mapBtns button{flex:1;padding:8px;font-size:14px;cursor:pointer;border:2px solid #222;border-radius:4px;}
+  #mapMsg{font-size:13px;color:#333;min-height:36px;margin-top:6px;line-height:1.5;}
+</style>
+</head>
+<body>
+<div id="hud">WASD / 方向键 移动 ｜ 靠近发光物按 <b>E</b> 拾取 ｜ 按 <b>M</b> 打开地图<br>记忆物：<span id="cnt">0</span> / <span id="total">2</span> ｜ 站在初始地块上才能调整拼图</div>
+<div id="prompt">按 E 拾取记忆物</div>
+<div id="toast"></div>
+<div id="importPanel" style="position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:9;">
+  <div style="background:#e8e8e8;padding:16px;border-radius:8px;width:min(640px,92vw);">
+    <div style="color:#222;font-size:14px;margin-bottom:6px;">粘贴地图编辑器（map_editor.html）导出的 JSON：</div>
+    <textarea id="importArea" style="width:100%;height:230px;font-family:Consolas,monospace;font-size:12px;"></textarea>
+    <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+      <button id="btnDoImport" style="padding:8px 18px;">载入</button>
+      <button id="btnCancelImport" style="padding:8px 18px;">取消</button>
+      <span id="importMsg" style="color:#a03030;font-size:13px;"></span>
+    </div>
+  </div>
+</div>
+<div id="mapPanel">
+  <div id="mapInner">
+    <div>
+      <canvas id="board" width="920" height="620"></canvas>
+      <div id="mapBtns">
+        <button id="btnFit">适应全部</button>
+        <button id="btnConfirm">确认拼合</button>
+        <button id="btnClose">关闭 (M)</button>
+        <button id="btnImportJson">导入编辑器 JSON</button>
+      </div>
+      <div id="mapMsg">把拼图放到与现有地块<b>相邻</b>的格子（不可旋转），确认后世界按当前布局重建。<br>只有在<b>初始固定地块</b>（十字区/绿色区）上才能调整拼图。道路对齐门口才能通行，其他位置有铁丝网。</div>
+    </div>
+    <div id="inv"><h3>地图拼图物品栏</h3><div id="invList" style="display:flex;flex-direction:column;gap:10px;"></div>
+      <div style="font-size:12px;color:#222;line-height:1.6;">点击拼图拿起 → 在地图上点击放置<br>点击已放置拼图可收回</div>
+    </div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+"use strict";
+let TILE=50,ROAD_W=8,DOOR_W=18;const R=6;   // 地块边长等参数可由编辑器 JSON 覆盖
+const rot1=(x,z)=>(-z,x);
+const rot1p=(x,z)=>(1-z,x);
+const rotCells=(cells,k)=>{let c=cells.map(p=>[...p]);for(let i=0;i<(k%4+4)%4;i++)c=c.map(([x,z])=>rot1(x,z));return c;};
+const rotPts=(pts,k)=>{let c=pts.map(p=>[...p]);for(let i=0;i<(k%4+4)%4;i++)c=c.map(([x,z])=>rot1p(x,z));return c;};
+const sr=n=>{const x=Math.sin(n*127.1)*43758.5453;return x-Math.floor(x);}; // 伪随机（稳定布局）
+
+// ---------- 世界数据：全部由地图编辑器导出的 JSON 驱动 ----------
+// ---------- 拼图数据：由地图编辑器导出的 JSON 驱动 ----------
+const DEFAULT_DATA={version:2,cfg:{tileSize:50,roadWidth:8,doorWidth:18},pieces:[
+ {name:"初始图层",color:"#c9c2b4",init:true,spawn:[0,0],
+  cells:[[0,0],[0,1],[0,-1],[-1,0],[1,0],
+         [3,0],[4,0],[3,-1],[4,-1]],
+  roads:[[[-1,0],[-2,0]],[[-1,0],[0,0]],[[0,0],[1,0]],[[1,0],[2,0]],
+         [[3,0],[2,0]],[[3,0],[3,-1]]],
+  doors:[[[-1,0],[-2,0]],[[1,0],[2,0]],[[3,0],[2,0]]]},
+ {name:"拼图① 蓝色桥梁",color:"#6f79d6",init:false,spawn:null,
+  cells:[[0,0],[0,-1]],
+  roads:[[[0,0],[-1,0]],[[0,0],[1,0]]],
+  doors:[[[0,0],[-1,0]],[[0,0],[1,0]]]},
+ {name:"拼图② 青色桥梁",color:"#5a9bd6",init:false,spawn:null,
+  cells:[[0,0],[1,0]],
+  roads:[[[0,0],[-1,0]],[[0,0],[1,0]],[[1,0],[2,0]]],
+  doors:[[[0,0],[-1,0]],[[1,0],[2,0]]]}
+]};
+let INIT=[],PIECES=[],placed={},lastData=null,gotMap={};
+let builtPlace={};   // 已建成拼图区域的摆放位置（拿起来判定时用于排除自己）
+function runtimeFrom(p,key){
+  const mx=Math.min(...p.cells.map(c=>c[0])),mz=Math.min(...p.cells.map(c=>c[1]));
+  const sh=c=>[c[0]-mx,c[1]-mz];                 // 格子/道路/出口/记忆物统一平移归一化
+  const cells=p.cells.map(sh);
+  const inset=new Set(cells.map(c=>c.join(",")));
+  const pt=(c,o)=>{const a=sh(c),b=sh(o);
+    return inset.has(a.join(","))?[a[0]+0.5,a[1]+0.5]
+      :[(a[0]+b[0])/2+0.5,(a[1]+b[1])/2+0.5];}; // 形状外的一端→边界中点
+  return {key,id:+key.slice(1),name:p.name||("区域"+key),color:p.color,mapFill:p.color,cells,
+    spawn:Array.isArray(p.spawn)?[p.spawn[0]-mx,p.spawn[1]-mz]:null,   // 出生点同步归一化
+    roads:(p.roads||[]).map(e=>[pt(e[0],e[1]),pt(e[1],e[0])]),
+    doors:(p.doors||[]).map(e=>{const a=sh(e[0]),b=sh(e[1]);
+      return [(a[0]+b[0])/2+0.5,(a[1]+b[1])/2+0.5];}),
+    items:(p.items||[]).map(sh)};
+}
+function loadPieces(d,remember){
+  lastData=d;
+  if(d.cfg){if(+d.cfg.tileSize>0)TILE=+d.cfg.tileSize;
+    if(+d.cfg.roadWidth>0)ROAD_W=+d.cfg.roadWidth;
+    if(+d.cfg.doorWidth>0)DOOR_W=+d.cfg.doorWidth;}
+  INIT=[];PIECES=[];
+  (d.pieces||[]).forEach(p=>{
+    if(p.init)INIT.push(runtimeFrom(p,"i"+INIT.length));
+    else PIECES.push(runtimeFrom(p,"p"+PIECES.length));
+  });
+  placed={};PIECES.forEach(p=>placed[p.id]=null);
+  try{if(remember)localStorage.setItem("jgd_puzzle_game_v1",JSON.stringify(d));}catch(e){}
+}
+loadPieces((()=>{try{const s=localStorage.getItem("jgd_puzzle_game_v1");return s?JSON.parse(s):DEFAULT_DATA;}catch(e){return DEFAULT_DATA;}})(),false);
+const walkSet=new Set();      // 可站立地块
+const cellRegion=new Map();   // "cx,cz" -> 区域key（判断是否同区域内部）
+const doorCount=new Map();    // "mx,mz"(世界) -> 两侧门口计数
+const obstacles=[];           // 实体障碍物 {x,z,r}：樱花树、石灯笼
+
+// ---------- Three.js ----------
+const scene=new THREE.Scene();scene.background=new THREE.Color(0xffffff);
+scene.fog=new THREE.Fog(0xffffff,180,420);
+const camera=new THREE.PerspectiveCamera(50,innerWidth/innerHeight,1,600);
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+scene.add(new THREE.AmbientLight(0xfff4ec,.78));
+const sun=new THREE.DirectionalLight(0xfff0dd,.55);sun.position.set(60,120,40);scene.add(sun);
+addEventListener("resize",()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+const regionGroups={};
+const roadMat=new THREE.MeshLambertMaterial({color:0xd8d2c4});       // 石板路
+const curbMat=new THREE.MeshLambertMaterial({color:0x6f685e});       // 路缘/台基
+const roadEdgeMat=new THREE.MeshLambertMaterial({color:0x8f867a});   // 路缘石
+const fenceRailMat=new THREE.MeshBasicMaterial({color:0x6a6a6a,transparent:true,opacity:.45});
+const postMat=new THREE.MeshLambertMaterial({color:0x3c3c3c});
+const gateMat=new THREE.MeshBasicMaterial({color:0x2ecc40});
+const toriiMat=new THREE.MeshLambertMaterial({color:0xb3402f});      // 鸟居红
+const trunkMat=new THREE.MeshLambertMaterial({color:0x6b4a2f});
+const blossomMats=[0xffb7c5,0xff9eb5,0xffc9d6].map(c=>new THREE.MeshLambertMaterial({color:c}));
+
+function keyOf(key){return key[0]==="i"?INIT[+key.slice(1)]:PIECES[+key.slice(1)];}
+function placeOf(key){return key[0]==="i"?null:placed[+key.slice(1)];}
+function defOf(key){
+  const d=keyOf(key),pl=placeOf(key);
+  const rot=0,ox=pl?pl.cx:0,oz=pl?pl.cz:0; // 拼图不可旋转
+  return {
+    cells:rotCells(d.cells,rot).map(([x,z])=>[x+ox,z+oz]),
+    roads:rotPts(d.roads,rot).map(poly=>poly.map(([x,z])=>[x+ox,z+oz])),
+    doors:rotPts(d.doors,rot).map(([x,z])=>[x+ox,z+oz])
+  };
+}
+function registerDoors(def){
+  def.doors.forEach(([mx,mz])=>{const k=(mx*TILE)+","+(mz*TILE);doorCount.set(k,(doorCount.get(k)||0)+1);});
+}
+
+// ---------- 场景装饰 ----------
+function addTree(parent,x,z,s){
+  const g=new THREE.Group();
+  const trunk=new THREE.Mesh(new THREE.CylinderGeometry(1.1,1.6,9,8),trunkMat);trunk.position.y=4.5;g.add(trunk);
+  const b1=new THREE.Mesh(new THREE.IcosahedronGeometry(6.5,1),blossomMats[0]);b1.position.y=12.5;g.add(b1);
+  const b2=new THREE.Mesh(new THREE.IcosahedronGeometry(4.8,1),blossomMats[1]);b2.position.set(4.2,10,2);g.add(b2);
+  const b3=new THREE.Mesh(new THREE.IcosahedronGeometry(4.2,1),blossomMats[2]);b3.position.set(-4.2,10.5,-2.2);g.add(b3);
+  g.position.set(x,0,z);g.rotation.y=sr(x*3+z)*6.28;g.scale.setScalar(s);g.userData.grow=true;parent.add(g);
+  obstacles.push({x,z,r:3.2*s});
+}
+function addLantern(parent,x,z){
+  const g=new THREE.Group();
+  const base=new THREE.Mesh(new THREE.CylinderGeometry(2,2.5,1.6,8),new THREE.MeshLambertMaterial({color:0x9a938a}));base.position.y=.8;g.add(base);
+  const col=new THREE.Mesh(new THREE.CylinderGeometry(.75,.85,4.8,8),new THREE.MeshLambertMaterial({color:0x8a837a}));col.position.y=3.9;g.add(col);
+  const light=new THREE.Mesh(new THREE.BoxGeometry(2.7,2.7,2.7),new THREE.MeshLambertMaterial({color:0xf1e3c2,emissive:0x8a7a4a}));light.position.y=7.4;g.add(light);
+  const roof=new THREE.Mesh(new THREE.ConeGeometry(3.2,2,4),new THREE.MeshLambertMaterial({color:0x55504a}));roof.position.y=9.5;roof.rotation.y=.78;g.add(roof);
+  g.position.set(x,0,z);g.userData.grow=true;parent.add(g);
+  obstacles.push({x,z,r:2.8});
+}
+function addTorii(parent,mx,mz,vertical,off){
+  const g=new THREE.Group(),w=DOOR_W/2+5;
+  const p1=new THREE.Mesh(new THREE.BoxGeometry(1.5,14,1.5),toriiMat);
+  const p2=p1.clone();
+  if(vertical){p1.position.set(mx+off,7,mz-w);p2.position.set(mx+off,7,mz+w);}
+  else{p1.position.set(mx-w,7,mz+off);p2.position.set(mx+w,7,mz+off);}
+  g.add(p1);g.add(p2);
+  const L=DOOR_W+16;
+  const l1=new THREE.Mesh(new THREE.BoxGeometry(vertical?2:L,1.3,vertical?L:2),toriiMat);
+  l1.position.set(vertical?mx+off:mx,14.6,vertical?mz:mz+off);g.add(l1);
+  const l2=new THREE.Mesh(new THREE.BoxGeometry(vertical?1.3:L-6,1,vertical?L-6:1.3),toriiMat);
+  l2.position.set(vertical?mx+off:mx,13,vertical?mz:mz+off);g.add(l2);
+  parent.add(g);
+}
+function decorateRegion(key,def,deco){
+  const hasRoad=new Set();
+  def.roads.forEach(poly=>{for(let i=0;i<poly.length-1;i++){
+    const [ax,az]=poly[i],[bx,bz]=poly[i+1];
+    if(az===bz){const x0=Math.floor(Math.min(ax,bx)+1e-6),x1=Math.ceil(Math.max(ax,bx)-1e-6);
+      for(let cx=x0;cx<x1;cx++)hasRoad.add(cx+","+(az-0.5));}
+  }});
+  def.cells.forEach(([cx,cz])=>{
+    const road=hasRoad.has(cx+","+cz);
+    const spots=road?[[9,7],[41,43]]:[[9,9],[41,15],[25,42]];
+    spots.forEach(([ox,oz],j)=>{
+      if(sr(cx*7.3+cz*13.7+ox*3.1+j)<0.3)return;               // 稀疏一些
+      addTree(deco,cx*TILE+ox,cz*TILE+oz,1.2+sr(cx+cz*2+j*5)*0.7);
+    });
+    if(road){addLantern(deco,cx*TILE+13,cz*TILE+14);addLantern(deco,cx*TILE+37,cz*TILE+36);}
+  });
+}
+
+// ---------- 生长动画：物体从地底升起，树木/灯笼破土放大 ----------
+let activeAnims=[];
+function setupGrowth(key,part){
+  const g=regionGroups[key];if(!g)return;
+  const t0=performance.now()/1000;
+  const def=defOf(key);
+  const cx0=def.cells.reduce((s,c)=>s+c[0],0)/def.cells.length*TILE+25;
+  const cz0=def.cells.reduce((s,c)=>s+c[1],0)/def.cells.length*TILE+25;
+  g.userData[part].children.forEach(ch=>{
+    const fy=ch.position.y;
+    const d=Math.hypot(ch.position.x-cx0,ch.position.z-cz0);
+    const delay=(part==="fences"?0.35:0)+d*0.004+sr(ch.id)*0.12;
+    activeAnims.push({ch,fy,start:t0+delay,dur:0.7,depth:10+Math.abs(fy),
+      scale:ch.userData.grow?ch.scale.x:null});
+    ch.position.y=fy-(10+Math.abs(fy));
+    if(ch.userData.grow)ch.scale.setScalar(0.01);
+  });
+}
+function stepGrowth(nowS){
+  for(let i=activeAnims.length-1;i>=0;i--){
+    const a=activeAnims[i];
+    if(!a.ch.parent){activeAnims.splice(i,1);continue;}
+    let p=(nowS-a.start)/a.dur;
+    if(p<=0)continue;
+    if(p>=1){p=1;activeAnims.splice(i,1);}
+    const e=1-Math.pow(1-p,3);                       // easeOutCubic
+    a.ch.position.y=a.fy-a.depth*(1-e);
+    if(a.scale!==null)a.ch.scale.setScalar(Math.max(0.01,a.scale*(0.15+0.85*e)));
+  }
+}
+
+// ---------- 区域构建 ----------
+function buildRegion(key){
+  if(regionGroups[key])return;
+  const d=keyOf(key),def=defOf(key);
+  if(key[0]==="p")builtPlace[key]={...placeOf(key)};   // 记录已建成的摆放位置
+  const g=new THREE.Group();
+  const col=new THREE.MeshLambertMaterial({color:d.color});
+  const tiles=new THREE.Group(),deco=new THREE.Group(),fences=new THREE.Group();
+  def.cells.forEach(([cx,cz])=>{
+    cellRegion.set(cx+","+cz,key);
+    walkSet.add(cx+","+cz);
+    const under=new THREE.Mesh(new THREE.BoxGeometry(TILE+0.8,0.6,TILE+0.8),curbMat);
+    under.position.set(cx*TILE+TILE/2,-0.75,cz*TILE+TILE/2);tiles.add(under);
+    const t=new THREE.Mesh(new THREE.BoxGeometry(TILE-0.4,1,TILE-0.4),col);
+    t.position.set(cx*TILE+TILE/2,-0.5,cz*TILE+TILE/2);tiles.add(t);
+  });
+  let roadIdx=0;
+  def.roads.forEach(poly=>{for(let i=0;i<poly.length-1;i++){
+    const [ax,az]=poly[i],[bx,bz]=poly[i+1];
+    const wax=ax*TILE,waz=az*TILE,wbx=bx*TILE,wbz=bz*TILE;
+    const len=Math.hypot(wbx-wax,wbz-waz),ang=-Math.atan2(wbz-waz,wbx-wax);
+    const road=new THREE.Group();
+    const main=new THREE.Mesh(new THREE.BoxGeometry(len,0.14,ROAD_W),roadMat);main.position.y=.07;road.add(main);
+    [-(ROAD_W/2+0.4),ROAD_W/2+0.4].forEach(o=>{const e=new THREE.Mesh(new THREE.BoxGeometry(len,0.1,0.9),roadEdgeMat);
+      e.position.set(0,.05,o);road.add(e);});
+    road.position.set((wax+wbx)/2,0.06+(roadIdx++)*0.004,(waz+wbz)/2);road.rotation.y=ang;deco.add(road);
+  }});
+  decorateRegion(key,def,deco);
+  registerDoors(def);
+  g.add(tiles);g.add(deco);g.add(fences);
+  g.userData={tiles,deco,fences};
+  scene.add(g);regionGroups[key]=g;
+  setupGrowth(key,"tiles");setupGrowth(key,"deco");
+  buildFences(key);
+}
+// 铁丝网：区域边界（相邻格不属于本区域）全部围栏；双边门口处留门洞+鸟居
+function buildFences(key){
+  const g=regionGroups[key];if(!g)return;
+  const f=g.userData.fences;
+  while(f.children.length)f.remove(f.children[0]);
+  const def=defOf(key);
+  const own=new Set(def.cells.map(c=>c.join(",")));
+  def.cells.forEach(([cx,cz])=>{
+    [[1,0],[-1,0],[0,1],[0,-1]].forEach(([dx,dz])=>{
+      if(own.has((cx+dx)+","+(cz+dz)))return;                     // 区域内部不围
+      const vertical=dx!==0;
+      const mx=vertical?Math.max(cx,cx+dx)*TILE:(cx+0.5)*TILE;
+      const mz=vertical?(cz+0.5)*TILE:Math.max(cz,cz+dz)*TILE;
+      const open=(doorCount.get(mx+","+mz)||0)>=2;
+      const off=1.3;
+      const ox=vertical?mx+(cx*TILE+25<mx?-off:off):mx;
+      const oz=vertical?mz:mz+(cz*TILE+25<mz?-off:off);
+      const post=t=>{const p=new THREE.Mesh(new THREE.BoxGeometry(0.6,7,0.6),postMat);
+        vertical?p.position.set(ox,3.5,mz+t):p.position.set(mx+t,3.5,oz);f.add(p);};
+      const rail=(c,l)=>{const r=new THREE.Mesh(new THREE.BoxGeometry(vertical?0.45:l,0.6,vertical?l:0.45),fenceRailMat);
+        vertical?r.position.set(ox,4.2,mz+c):r.position.set(mx+c,4.2,oz);f.add(r);};
+      if(open){
+        const half=DOOR_W/2;
+        post(-(half+3));post(half+3);
+        rail(-(25+half)/2,25-half);rail((25+half)/2,25-half);
+        const mark=new THREE.Mesh(new THREE.BoxGeometry(vertical?3:DOOR_W-2,0.12,vertical?DOOR_W-2:3),gateMat);
+        mark.position.set(mx,0.1,mz);f.add(mark);
+        // 鸟居只由西侧/北侧一侧绘制，避免重影
+        if((vertical&&cx*TILE+25<mx)||(!vertical&&cz*TILE+25<mz))addTorii(f,mx,mz,vertical,0);
+      }else{
+        [-21,-10.5,0,10.5,21].forEach(post);rail(0,TILE-4);
+      }
+    });
+  });
+  setupGrowth(key,"fences");                                     // 围栏稍晚于地块长出
+}
+function rebuildFences(){Object.keys(regionGroups).forEach(buildFences);}// 按当前拼图布局重建整个动态世界（地块/道路/围栏/门口/障碍）
+function rebuildWorld(){
+  Object.keys(regionGroups).forEach(k=>{scene.remove(regionGroups[k]);delete regionGroups[k];});
+  activeAnims=[];builtPlace={};
+  walkSet.clear();cellRegion.clear();doorCount.clear();obstacles.length=0;
+  INIT.forEach((p,i)=>buildRegion("i"+i));
+  PIECES.forEach(p=>{if(placed[p.id])buildRegion("p"+p.id);});
+  rebuildFences();
+}
+// 玩家是否站在初始固定地块上（只有在其上才能调整拼图）
+function playerOnFixed(){
+  const r=cellRegion.get(Math.floor(pState.x/TILE)+","+Math.floor(pState.z/TILE));
+  return !!r&&r[0]==="i";
+}
+
+// 飘落樱花瓣
+const petalCount=140;
+const petalPos=new Float32Array(petalCount*3),petalSpd=new Float32Array(petalCount);
+for(let i=0;i<petalCount;i++){
+  petalPos[i*3]=-120+sr(i)*460;petalPos[i*3+1]=2+sr(i+99)*36;petalPos[i*3+2]=-160+sr(i+55)*360;
+  petalSpd[i]=1.2+sr(i+7)*2;
+}
+const petalGeo=new THREE.BufferGeometry();
+petalGeo.setAttribute("position",new THREE.BufferAttribute(petalPos,3));
+const petals=new THREE.Points(petalGeo,new THREE.PointsMaterial({color:0xffb7c5,size:1.1}));
+scene.add(petals);
+
+// 记忆物（数量=拼图数量，摆放在初始区域外围格子）
+let items=[];
+function spawnComponentCells(){ // 出生点所在的连通区块（记忆物只放这里，防止软锁）
+  const all=new Set();INIT.forEach(r=>r.cells.forEach(c=>all.add(c.join(","))));
+  const start=getSpawnCell().join(","),seen=new Set([start]),q=[start];
+  while(q.length){const [x,z]=q.pop();
+    [[1,0],[-1,0],[0,1],[0,-1]].forEach(([dx,dz])=>{
+      const k=(x+dx)+","+(z+dz);
+      if(all.has(k)&&!seen.has(k)){seen.add(k);q.push(k);}});}
+  return [...seen].map(k=>k.split(",").map(Number));
+}
+function buildItems(){
+  items.forEach(it=>{if(!it.got)scene.remove(it.mesh);});
+  const defs=[];
+  const spawnK=new Set(INIT.filter(p=>p.spawn).map(p=>p.spawn.join(",")));
+  // 初始图层上的记忆物＝解锁拼图的钥匙（按摆放顺序对应拼图顺序）
+  INIT.forEach(r=>r.items.forEach(c=>defs.push(
+    {key:r.key+":"+c.join(","),cell:c,init:true,name:"记忆物",unlock:true})));
+  // 没摆放任何记忆物：自动放在出生点所在连通区块
+  if(!defs.length){
+    spawnComponentCells().filter(c=>!spawnK.has(c.join(","))).slice(0,PIECES.length)
+      .forEach((c,i)=>defs.push({key:"auto:"+i,cell:c,init:true,
+        name:PIECES[i]?PIECES[i].name:"记忆物",unlock:true}));
+  }
+  defs.forEach((d,i)=>{d.unlockPid=i<PIECES.length?i:null;});
+  // 拼图自带格上的记忆物＝拼合后出现的额外收集品（不承担解锁）
+  PIECES.forEach(r=>{if(placed[r.id])r.items.forEach(c=>
+    defs.push({key:r.key+":"+c.join(","),cell:c,init:false,name:r.name,unlockPid:null,ownPid:r.id}));});
+  items=defs.map(d=>{
+    const off=d.init?[0,0]:[(placed[d.ownPid]||{}).cx||0,(placed[d.ownPid]||{}).cz||0];
+    const m=new THREE.Mesh(new THREE.IcosahedronGeometry(3,0),
+      new THREE.MeshLambertMaterial({color:0xffd400,emissive:0x9a7a10}));
+    m.position.set((off[0]+d.cell[0])*TILE+25,6,(off[1]+d.cell[1])*TILE+25);scene.add(m);
+    return {mesh:m,def:d,got:!!gotMap[d.key],key:d.key};
+  });
+  document.getElementById("total").textContent=items.length;
+  document.getElementById("cnt").textContent=items.filter(i=>i.got).length;
+}
+// 玩家
+const player=new THREE.Group();
+const body=new THREE.Mesh(new THREE.CylinderGeometry(2.5,2.5,8,16),new THREE.MeshLambertMaterial({color:0x3a5bd9}));
+body.position.y=4;player.add(body);
+const head=new THREE.Mesh(new THREE.SphereGeometry(2.4,16,12),new THREE.MeshLambertMaterial({color:0xf0c8a0}));
+head.position.y=10;player.add(head);scene.add(player);
+const pState={x:0,z:0};
+function getSpawnCell(){
+  const r=INIT.find(p=>p.spawn);
+  return r?r.spawn.slice():((INIT[0]&&INIT[0].cells[0])||[0,0]).slice();
+}
+function setPlayerToSpawn(){
+  const c=getSpawnCell();
+  pState.x=(c[0]+0.5)*TILE;pState.z=(c[1]+0.5)*TILE;
+  player.position.set(pState.x,0,pState.z);
+  camera.position.set(pState.x,70,pState.z+50);
+}
+// ---------- 世界初始化 ----------
+rebuildWorld();buildItems();setPlayerToSpawn();
+
+// ---------- 碰撞：地块边缘判定 + 阻碍物判定 ----------
+function edgeOpen(aKey,bKey){ // aKey/bKey: "cx,cz"
+  if(!walkSet.has(aKey)||!walkSet.has(bKey))return false;      // 地块外：不可进入
+  if(cellRegion.get(aKey)===cellRegion.get(bKey))return true;  // 同区域内部：畅通
+  const [ax,az]=aKey.split(",").map(Number),[bx,bz]=bKey.split(",").map(Number);
+  const vertical=ax!==bx;
+  const mx=vertical?Math.max(ax,bx)*TILE:(ax+0.5)*TILE;
+  const mz=vertical?(az+0.5)*TILE:Math.max(az,bz)*TILE;
+  return (doorCount.get(mx+","+mz)||0)>=2;                     // 跨区域：两侧门口对齐才通行
+}
+function attempt(nx,nz){
+  const cKey=Math.floor(nx/TILE)+","+Math.floor(nz/TILE);
+  if(!walkSet.has(cKey))return false;
+  // 阻碍物（樱花树/石灯笼）
+  for(const o of obstacles){
+    const ddx=nx-o.x,ddz=nz-o.z;
+    if(ddx*ddx+ddz*ddz<(o.r+R)*(o.r+R))return false;
+  }
+  // 地块边缘（铁丝网/门口）
+  const ocx=Math.floor(pState.x/TILE),ocz=Math.floor(pState.z/TILE);
+  const ncx=Math.floor(nx/TILE),ncz=Math.floor(nz/TILE);
+  if(ncx!==ocx&&!edgeOpen(ocx+","+ocz,ncx+","+ocz))return false;
+  if(ncz!==ocz&&!edgeOpen(ocx+","+ocz,ocx+","+ncz))return false;
+  // 四角仍需站在地块上
+  return [[nx-R,nz-R],[nx+R,nz-R],[nx-R,nz+R],[nx+R,nz+R]]
+    .every(([x,z])=>walkSet.has(Math.floor(x/TILE)+","+Math.floor(z/TILE)));
+}
+function tryMove(nx,nz){
+  if(attempt(nx,nz)){pState.x=nx;pState.z=nz;return;}
+  if(attempt(nx,pState.z))pState.x=nx;
+  else if(attempt(pState.x,nz))pState.z=nz;
+}
+
+// ---------- 输入 ----------
+const keys={};
+addEventListener("keydown",e=>{
+  keys[e.key.toLowerCase()]=true;
+  const k=e.key.toLowerCase();
+  if(k==="m")toggleMap();
+  if(k==="e")tryPickup();
+});
+addEventListener("keyup",e=>keys[e.key.toLowerCase()]=false);
+
+let nearItem=null;
+function tryPickup(){
+  if(nearItem&&!nearItem.got){
+    nearItem.got=true;gotMap[nearItem.key]=true;scene.remove(nearItem.mesh);
+    document.getElementById("cnt").textContent=items.filter(i=>i.got).length;
+    showToast("获得【"+nearItem.def.name+"】！按 M 打开地图，把它接到现有地块的边缘");
+  }
+}
+function showToast(t){const el=document.getElementById("toast");el.textContent=t;el.style.display="block";el.style.opacity=1;
+  clearTimeout(el._t);el._t=setTimeout(()=>{el.style.opacity=0;setTimeout(()=>el.style.display="none",500);},3000);}
+
+// ---------- 地图面板 ----------
+const panel=document.getElementById("mapPanel"),board=document.getElementById("board"),ctx=board.getContext("2d");
+const CS=70,MINCX=-8,MAXCX=16,MINCZ=-8,MAXCZ=12,BASE_OX=20,BASE_OY=20;
+let view={s:1,ox:0,oy:0};          // 拼图板视图：缩放+平移
+let carrying=null,mouseCell=null;
+function cellPx(cx,cz){return [BASE_OX+(cx-MINCX)*CS, BASE_OY+(cz-MINCZ)*CS];} // -z 朝屏幕上方
+function pxCell(px,py){const bx=(px-view.ox)/view.s,by=(py-view.oy)/view.s;
+  return [Math.floor(bx/CS)+MINCX, MINCZ+Math.floor(by/CS)];}
+function fitAll(){
+  const cs=[];
+  INIT.forEach(r=>r.cells.forEach(c=>cs.push(c)));
+  PIECES.forEach(p=>{if(placed[p.id])pieceAbs(p,placed[p.id]).forEach(c=>cs.push(c));});
+  if(carrying!==null&&mouseCell)
+    pieceAbs(PIECES[carrying],{cx:mouseCell[0],cz:mouseCell[1]}).forEach(c=>cs.push(c));
+  if(!cs.length){view={s:1,ox:0,oy:0};drawBoard();return;}
+  const xs=cs.map(c=>c[0]),zs=cs.map(c=>c[1]);
+  const minx=Math.min(...xs)-1,maxx=Math.max(...xs)+2;
+  const minz=Math.min(...zs)-1,maxz=Math.max(...zs)+2;
+  const w=(maxx-minx)*CS,h=(maxz-minz)*CS;
+  view.s=Math.min(board.width/w,board.height/h,2);
+  view.ox=(board.width-w*view.s)/2-(minx-MINCX)*CS*view.s;
+  view.oy=(board.height-h*view.s)/2-(minz-MINCZ)*CS*view.s;
+  drawBoard();
+}
+function toggleMap(){
+  const open=panel.style.display!=="flex";
+  panel.style.display=open?"flex":"none";
+  if(open){carrying=null;renderInv();fitAll();}
+}
+document.getElementById("btnClose").onclick=toggleMap;
+
+function pieceAbs(p,pl){return p.cells.map(([x,z])=>[x+pl.cx,z+pl.cz]);}
+function otherPlaced(id){const s=new Set();
+  PIECES.forEach(q=>{if(q.id!==id&&placed[q.id])pieceAbs(q,placed[q.id]).forEach(c=>s.add(c.join(",")));});
+  return s;}
+// 占用判定：walkSet 去掉“手里这块拼图自己已建成的格子”（拿起来重放不冲突）
+function occupiedSet(excludePid){
+  const s=new Set(walkSet);
+  if(excludePid!==null&&excludePid!==undefined){
+    const bp=builtPlace["p"+excludePid];
+    if(bp&&PIECES[excludePid])PIECES[excludePid].cells.forEach(c=>s.delete((bp.cx+c[0])+","+(bp.cz+c[1])));
+  }
+  return s;
+}
+function validate(p,pl){
+  const cells=pieceAbs(p,pl).map(c=>c.join(","));
+  const own=new Set(cells);
+  const others=otherPlaced(p.id);
+  // “现有地块”= 初始地块 + 其他拼图已生成的格子（排除自己当前占用的格子
+  const othersWalk=new Set([...walkSet].filter(k=>!own.has(k)));
+  // 再排除自己上一次建成的位置（移动拼图时允许新旧位置重叠）
+  const bp=builtPlace["p"+p.id];
+  if(bp)PIECES[p.id]&&PIECES[p.id].cells.forEach(c=>othersWalk.delete((bp.cx+c[0])+","+(bp.cz+c[1])));
+  if(cells.some(c=>othersWalk.has(c)))return "与现有地块重叠";
+  if(cells.some(c=>others.has(c)))return "与其他拼图重叠";
+  const adj=[[1,0],[-1,0],[0,1],[0,-1]];
+  const touch=cells.some(c=>{const [cx,cz]=c.split(",").map(Number);
+    return adj.some(([dx,dz])=>othersWalk.has((cx+dx)+","+(cz+dz))||others.has((cx+dx)+","+(cz+dz)));});
+  if(!touch)return "至少要有一条边与地图中现有地块相接";
+  return null;
+}
+document.getElementById("btnConfirm").onclick=()=>{
+  const msgEl=document.getElementById("mapMsg");
+  if(!playerOnFixed()){msgEl.style.color="#7a2020";
+    msgEl.textContent="当前位置无法调整拼图：请先站在初始固定地块（勾选了「初始区域」的地块）上。";return;}
+  const errs=[];let any=false;
+  PIECES.forEach(p=>{
+    const pl=placed[p.id];
+    if(!pl)return;
+    any=true;
+    const err=validate(p,pl);
+    if(err)errs.push(p.name+"："+err);
+  });
+  if(errs.length){msgEl.style.color="#7a2020";msgEl.innerHTML=errs.join("<br>");return;}
+  if(!any){msgEl.style.color="#333";msgEl.innerHTML="还没有放置任何拼图。从右侧拿起拼图放到地图上。";return;}
+  rebuildWorld();buildItems();
+  renderInv();drawBoard();
+  msgEl.style.color="#1c5c1c";msgEl.textContent="拼合已应用！世界已按当前布局重建，之后可随时回来重新调整。";
+  showToast("世界随拼图改变。沿石板路走一走，看看哪些门口通了。");
+};
+
+function drawDoorAbs(){} // 门口不显示在地图上，只在 3D 场景中体现（已停用）
+function drawBoard(){
+  ctx.clearRect(0,0,board.width,board.height);
+  ctx.save();ctx.translate(view.ox,view.oy);ctx.scale(view.s,view.s);
+  const lw=w=>w/view.s;                              // 线宽不随缩放变粗
+  // 可见范围网格
+  const u0x=-view.ox/view.s,u1x=(board.width-view.ox)/view.s;
+  const u0y=-view.oy/view.s,u1y=(board.height-view.oy)/view.s;
+  const c0x=Math.floor(u0x/CS)+MINCX,c1x=Math.ceil(u1x/CS)+MINCX;
+  const c0z=Math.floor(u0y/CS)+MINCZ,c1z=Math.ceil(u1y/CS)+MINCZ;
+  ctx.strokeStyle="#888";ctx.lineWidth=lw(1);
+  for(let cx=c0x;cx<=c1x;cx++){const [x]=cellPx(cx,c0z);ctx.beginPath();ctx.moveTo(x,u0y);ctx.lineTo(x,u1y);ctx.stroke();}
+  for(let cz=c0z;cz<=c1z;cz++){const [,y]=cellPx(c0x,cz);ctx.beginPath();ctx.moveTo(u0x,y);ctx.lineTo(u1x,y);ctx.stroke();}
+  INIT.forEach(def=>{
+    def.cells.forEach(([cx,cz])=>{const [x,y]=cellPx(cx,cz);
+      ctx.fillStyle=def.mapFill;ctx.fillRect(x+1,y+1,CS-2,CS-2);});
+    ctx.strokeStyle="#fff";ctx.lineWidth=lw(5);ctx.lineJoin="round";
+    def.roads.forEach(poly=>{ctx.beginPath();
+      poly.forEach(([gx,gz],i)=>{const [x,y]=cellPx(gx,gz);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();});
+    def.doors.forEach(()=>{}); // 门口不上图
+  });
+  PIECES.forEach(p=>{const pl=placed[p.id];if(pl)drawPiece(p,pl.cx,pl.cz,1);});
+  if(carrying!==null&&mouseCell){
+    drawPiece(PIECES[carrying],mouseCell[0],mouseCell[1],.6);
+    const cells=pieceAbs(PIECES[carrying],{cx:mouseCell[0],cz:mouseCell[1]}).map(c=>c.join(","));
+    const occ=occupiedSet(carrying);
+    const others=otherPlaced(carrying);
+    if(cells.some(c=>occ.has(c)||others.has(c))){
+      ctx.fillStyle="rgba(220,40,40,.45)";                       // 悬停重叠处显示红色警告
+      cells.forEach(k=>{if(occ.has(k)||others.has(k)){
+        const [cx,cz]=k.split(",").map(Number);const [x,y]=cellPx(cx,cz);
+        ctx.fillRect(x+2,y+2,CS-4,CS-4);}});
+    }
+  }
+  ctx.restore();
+}
+function drawPiece(p,cx,cz,alpha){
+  const lw=w=>w/view.s;
+  ctx.globalAlpha=alpha;
+  p.cells.forEach(([dx,dz])=>{const [x,y]=cellPx(cx+dx,cz+dz);
+    ctx.fillStyle=p.mapFill;ctx.fillRect(x+2,y+2,CS-4,CS-4);
+    ctx.strokeStyle="#222";ctx.lineWidth=lw(2);ctx.strokeRect(x+2,y+2,CS-4,CS-4);});
+  ctx.strokeStyle="#fff";ctx.lineWidth=lw(5);ctx.lineJoin="round";
+  p.roads.forEach(poly=>{ctx.beginPath();
+    poly.forEach(([gx,gz],i)=>{const [x,y]=cellPx(cx+gx,cz+gz);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();});
+  ctx.globalAlpha=1;
+}
+let pan=null;
+board.addEventListener("contextmenu",e=>e.preventDefault());
+board.addEventListener("wheel",e=>{
+  e.preventDefault();
+  const r=board.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+  const ns=Math.min(3,Math.max(.3,view.s*(e.deltaY<0?1.15:1/1.15)));
+  const k=ns/view.s;
+  view.ox=mx-(mx-view.ox)*k;view.oy=my-(my-view.oy)*k;view.s=ns;
+  drawBoard();
+},{passive:false});
+board.addEventListener("mousemove",e=>{const r=board.getBoundingClientRect();
+  if(pan){view.ox=pan.ox+e.clientX-pan.x;view.oy=pan.oy+e.clientY-pan.y;drawBoard();return;}
+  mouseCell=pxCell(e.clientX-r.left,e.clientY-r.top);drawBoard();});
+board.addEventListener("mousedown",e=>{
+  if(e.button===2){const r=board.getBoundingClientRect();
+    pan={x:e.clientX,y:e.clientY,ox:view.ox,oy:view.oy};return;}
+  if(!playerOnFixed()){drawBoard();return;}
+  if(carrying!==null&&mouseCell){
+    const cells=pieceAbs(PIECES[carrying],{cx:mouseCell[0],cz:mouseCell[1]}).map(c=>c.join(","));
+    const occ=occupiedSet(carrying);
+    const others=otherPlaced(carrying);
+    if(cells.some(c=>occ.has(c)||others.has(c))){
+      const msgEl=document.getElementById("mapMsg");
+      msgEl.style.color="#7a2020";
+      msgEl.textContent="地块之间不能重叠：请换一个不与现有地块/其他拼图重合的位置。";
+      return;
+    }
+    placed[carrying]={cx:mouseCell[0],cz:mouseCell[1]};
+    carrying=null;renderInv();drawBoard();return;
+  }
+  for(const p of PIECES){
+    const pl=placed[p.id];if(!pl)continue;
+    if(pieceAbs(p,pl).some(([cx,cz])=>mouseCell&&cx===mouseCell[0]&&cz===mouseCell[1])){
+      carrying=p.id;placed[p.id]=null;renderInv();drawBoard();break;}
+  }
+});
+addEventListener("mouseup",e=>{if(e.button===2)pan=null;});
+document.getElementById("btnFit").onclick=fitAll;
+function renderInv(){
+  const list=document.getElementById("invList");list.innerHTML="";
+  let shown=0;
+  PIECES.forEach(p=>{
+    if(placed[p.id])return;                     // 已放在地图上的拼图不再显示在物品栏
+    const unlockItem=items.find(d=>d.def.unlockPid===p.id);
+    const got=unlockItem?unlockItem.got:true;   // 没有对应记忆物的拼图默认可见
+    if(!got)return;
+    shown++;
+    const div=document.createElement("div");
+    div.className="invItem"+(carrying===p.id?" sel":"");
+    const cv=document.createElement("canvas");cv.width=120;cv.height=120;
+    const c=cv.getContext("2d");
+    const cells=p.cells;
+    const minz=Math.min(...cells.map(c2=>c2[1])),minx=Math.min(...cells.map(c2=>c2[0]));
+    const s=Math.min(50,100/Math.max(...cells.map(c2=>[c2[0]-minx+1,c2[1]-minz+1]).flat()));
+    c.fillStyle=p.mapFill;
+    cells.forEach(([dx,dz])=>c.fillRect(10+(dx-minx)*s,10+(dz-minz)*s,s-3,s-3));
+    c.strokeStyle="#fff";c.lineWidth=4;c.lineJoin="round";
+    p.roads.forEach(poly=>{c.beginPath();
+      poly.forEach(([gx,gz],i)=>{const px=10+(gx-minx)*s,py=10+(gz-minz)*s;i?c.lineTo(px,py):c.moveTo(px,py);});c.stroke();});
+    div.appendChild(cv);
+    const t=document.createElement("div");
+    t.textContent=(carrying===p.id?"【手持中】":"")+p.name;
+    div.appendChild(t);
+    div.onclick=()=>{
+      if(!playerOnFixed())return;
+      carrying=(carrying===p.id)?null:p.id;
+      renderInv();drawBoard();};
+    list.appendChild(div);
+  });
+  if(!shown){const d=document.createElement("div");d.style.cssText="color:#ddd;font-size:13px;text-align:center;line-height:1.6;";
+    d.textContent=PIECES.every(p=>items.find(x=>x.def.unlockPid===p.id)?.got!==false)
+      ?"拼图都已放在地图上\n（点击地图上的拼图可收回）"
+      :"尚未获得拼图，去探索吧";
+    list.appendChild(d);}
+}
+
+// ---------- 主循环 ----------
+let last=performance.now();
+function loop(now){
+  const dt=Math.min(.05,(now-last)/1000);last=now;
+  let dx=0,dz=0;
+  if(keys["w"]||keys["arrowup"])dz-=1;
+  if(keys["s"]||keys["arrowdown"])dz+=1;
+  if(keys["a"]||keys["arrowleft"])dx-=1;
+  if(keys["d"]||keys["arrowright"])dx+=1;
+  if(dx||dz){const l=Math.hypot(dx,dz),sp=30*dt;tryMove(pState.x+dx/l*sp,pState.z+dz/l*sp);}
+  player.position.set(pState.x,0,pState.z);
+  camera.position.lerp(new THREE.Vector3(pState.x,70,pState.z+50),.12);
+  camera.lookAt(pState.x,0,pState.z);
+  nearItem=null;
+  items.forEach(it=>{if(it.got)return;
+    it.mesh.rotation.y+=dt*2;it.mesh.position.y=6+Math.sin(now/400)*1.2;
+    if(Math.hypot(it.mesh.position.x-pState.x,it.mesh.position.z-pState.z)<12)nearItem=it;});
+  document.getElementById("prompt").style.display=nearItem?"block":"none";
+  stepGrowth(now/1000);
+  const arr=petalGeo.attributes.position.array;
+  for(let i=0;i<petalCount;i++){
+    arr[i*3+1]-=petalSpd[i]*dt*2;arr[i*3]+=Math.sin(now/900+i)*dt*.8;
+    if(arr[i*3+1]<0.5)arr[i*3+1]=30+sr(i+Math.floor(now/4000))*14;
+  }
+  petalGeo.attributes.position.needsUpdate=true;
+  renderer.render(scene,camera);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+showToast("寻找发光的记忆物。绿色区域被铁丝网围住——只有门口的鸟居能进！");
+
+// 导入编辑器 JSON
+const importPanel=document.getElementById("importPanel");
+document.getElementById("btnImportJson").onclick=()=>{
+  document.getElementById("importArea").value=lastData?JSON.stringify(lastData):"";
+  document.getElementById("importMsg").textContent="";
+  importPanel.style.display="flex";
+};
+document.getElementById("btnCancelImport").onclick=()=>importPanel.style.display="none";
+document.getElementById("btnDoImport").onclick=()=>{
+  try{
+    loadPieces(JSON.parse(document.getElementById("importArea").value),true);
+    carrying=null;gotMap={};
+    rebuildWorld();buildItems();setPlayerToSpawn();renderInv();drawBoard();
+    importPanel.style.display="none";
+    showToast("已载入 "+PIECES.length+" 张拼图（地块边长 "+TILE+"m）。收集记忆物开始测试吧！");
+  }catch(err){
+    document.getElementById("importMsg").textContent="解析失败："+err.message;
+  }
+};
+
+// 调试：#debug 自动拼好桥梁
+if(location.hash.includes("debug")&&PIECES.length){
+  placed[0]={cx:2,cz:0};
+  document.getElementById("btnConfirm").click();
+}
+</script>
+</body>
+</html>

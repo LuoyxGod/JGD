@@ -1,0 +1,118 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f35dbeda44c9ba24cb036496054f43dc, type: 3}
+  m_Name: PuzzleRegistry
+  m_EditorClassIdentifier: Assembly-CSharp::JGD.Level.PuzzleRegistry
+  level:
+    version: 2
+    cfg:
+      tileSize: 60
+      roadWidth: 8
+      doorWidth: 18
+    pieces:
+    - name: "PZ_\u521D\u59CB"
+      color: '#8bfe3e'
+      init: 1
+      spawn:
+        x: -1
+        z: -1
+      cells:
+      - x: -2
+        z: -1
+      - x: -1
+        z: -2
+      - x: -1
+        z: -1
+      - x: -1
+        z: 0
+      - x: 0
+        z: -1
+      roads:
+      - a:
+          x: 0
+          z: 0
+        b:
+          x: 0
+          z: 0
+      - a:
+          x: 0
+          z: 0
+        b:
+          x: 0
+          z: 0
+      doors:
+      - a:
+          x: 0
+          z: 0
+        b:
+          x: 0
+          z: 0
+      items:
+      - x: -1
+        z: -2
+    - name: PZ_First
+      color: '#6f79d6'
+      init: 0
+      spawn:
+        x: 0
+        z: 0
+      cells:
+      - x: 1
+        z: -1
+      - x: 2
+        z: -1
+      - x: 2
+        z: 0
+      - x: 3
+        z: 0
+      roads:
+      - a:
+          x: 0
+          z: 0
+        b:
+          x: 0
+          z: 0
+      - a:
+          x: 0
+          z: 0
+        b:
+          x: 0
+          z: 0
+      - a:
+          x: 0
+          z: 0
+        b:
+          x: 0
+          z: 0
+      - a:
+          x: 0
+          z: 0
+        b:
+          x: 0
+          z: 0
+      doors:
+      - a:
+          x: 0
+          z: 0
+        b:
+          x: 0
+          z: 0
+      items: []
+  entries:
+  - pieceName: "PZ_\u521D\u59CB"
+    prefab: {fileID: 0}
+    modeledTileSize: 60
+    done: 0
+  - pieceName: PZ_First
+    prefab: {fileID: 0}
+    modeledTileSize: 60
+    done: 0
